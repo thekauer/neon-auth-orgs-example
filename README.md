@@ -1,5 +1,7 @@
 # Multi-Tenant Todo App with Neon Auth & Organizations
 
+![Example](example.gif)
+
 A multi-tenant todo app using **Neon Auth** for authentication and the **Organizations plugin** for team management. Every todo is scoped to an organization, and members can be invited, have their roles changed, or be removed.
 
 ---
