@@ -11,11 +11,12 @@ A multi-tenant todo app using **Neon Auth** for authentication and the **Organiz
 0. [Setup](#0-setup)
 1. [Setting Up Neon Auth](#1-setting-up-neon-auth)
 2. [Database & Schema Setup](#2-database--schema-setup)
-3. [Organization Management](#3-organization-management)
-4. [Org-Scoped Data (the `org_id` Column)](#4-org-scoped-data-the-org_id-column)
-5. [Member & Invitation Management](#5-member--invitation-management)
-6. [Edge Cases & Error Handling](#6-edge-cases--error-handling)
-7. [Admin-Only Server-Side Org Creation (Bypassing the Limit)](#7-admin-only-server-side-org-creation-bypassing-the-limit)
+3. [Accessing the `neon_auth` Schema with Drizzle](#3-accessing-the-neon_auth-schema-with-drizzle)
+4. [Organization Management](#4-organization-management)
+5. [Org-Scoped Data (the `org_id` Column)](#5-org-scoped-data-the-org_id-column)
+6. [Member & Invitation Management](#6-member--invitation-management)
+7. [Edge Cases & Error Handling](#7-edge-cases--error-handling)
+8. [Admin-Only Server-Side Org Creation (Works Even When "Allow Users to Create Organizations" Is Disabled)](#8-admin-only-server-side-org-creation-works-even-when-allow-users-to-create-organizations-is-disabled)
 
 ---
 
@@ -206,17 +207,40 @@ export default defineConfig({
 
 Run `npx drizzle-kit push` to sync the schema to the database.
 
-### Pulling the `neon_auth` Schema into Drizzle
+---
 
-The `neon_auth` schema (organizations, members, invitations, etc.) is managed by Neon Auth — you don't create those tables yourself. But you **can** access them from your app code using Drizzle by pulling them:
+## 3. Accessing the `neon_auth` Schema with Drizzle
 
-1. Add `schemaFilter: ["public", "neon_auth"]` to `drizzle.config.ts` (shown above)
-2. Run `npx drizzle-kit pull`
+The `neon_auth` schema (organizations, members, invitations, users, sessions, etc.) is managed by Neon Auth — you never create those tables yourself. But you **can** get type-safe Drizzle access to them. This is the key trick that enables server-side operations like the [admin org creation endpoint](#8-admin-only-server-side-org-creation-bypassing-the-limit).
 
-This introspects both schemas and generates typed table definitions in `drizzle/schema.ts`. You can then copy the tables you need into your app's schema file (`src/db/schema.ts`):
+### Step 1. Add `schemaFilter` to `drizzle.config.ts`
 
 ```ts
-import { pgSchema } from "drizzle-orm/pg-core";
+export default defineConfig({
+  schema: "./src/db/schema.ts",
+  out: "./drizzle",
+  dialect: "postgresql",
+  schemaFilter: ["public", "neon_auth"],  // <-- this is the trick
+  dbCredentials: { url: process.env.DATABASE_URL! },
+});
+```
+
+By default Drizzle only sees the `public` schema. Adding `"neon_auth"` tells it to also introspect the auth tables.
+
+### Step 2. Pull the schema
+
+```bash
+npx drizzle-kit pull
+```
+
+This introspects both schemas and generates typed table definitions in `drizzle/schema.ts` — including all `neon_auth` tables (`organization`, `member`, `invitation`, `user`, `session`, `jwks`, `verification`, `project_config`).
+
+### Step 3. Copy the tables you need into your app's schema
+
+Take the tables you need from the generated `drizzle/schema.ts` and add them to `src/db/schema.ts`:
+
+```ts
+import { pgSchema, uuid, text, timestamp } from "drizzle-orm/pg-core";
 
 const neonAuth = pgSchema("neon_auth");
 
@@ -238,11 +262,11 @@ export const memberInNeonAuth = neonAuth.table("member", {
 });
 ```
 
-Now you can use `db.insert(organizationInNeonAuth)` instead of raw SQL — with full type safety.
+Now you can use `db.insert(organizationInNeonAuth)` with full type safety — no raw SQL needed. Since `src/db/index.ts` imports `* as schema`, these tables are automatically available through the `db` instance.
 
 ---
 
-## 3. Organization Management
+## 4. Organization Management
 
 All organization operations use the Neon Auth client SDK. No custom API routes are needed for standard org CRUD — the SDK talks directly to the Neon Auth backend.
 
@@ -314,7 +338,7 @@ const { data: activeMember } = authClient.useActiveMember(); // current user's m
 
 ---
 
-## 4. Org-Scoped Data (the `org_id` Column)
+## 5. Org-Scoped Data (the `org_id` Column)
 
 The `todo` table includes an `org_id` column that ties every record to an organization:
 
@@ -368,7 +392,7 @@ If the todo doesn't belong to the active organization, the query returns nothing
 
 ---
 
-## 5. Member & Invitation Management
+## 6. Member & Invitation Management
 
 ### Changing Member Roles
 
@@ -433,7 +457,7 @@ await authClient.organization.rejectInvitation({ invitationId: inv.id });
 
 ---
 
-## 6. Edge Cases & Error Handling
+## 7. Edge Cases & Error Handling
 
 ### The Neon Auth Error Type
 
@@ -556,60 +580,13 @@ const { data: session } = await auth.getSession({
 
 ---
 
-## 7. Admin-Only Server-Side Org Creation (Bypassing the Limit)
+## 8. Admin-Only Server-Side Org Creation (Works Even When "Allow Users to Create Organizations" Is Disabled)
 
-This is the most important pattern in the project. The Neon Auth SDK enforces per-user organization limits on the client side. But sometimes an **admin** needs to create organizations beyond that limit — for example, provisioning orgs for new customers.
+The Neon console has an **"Allow Users to Create Organizations"** toggle. When this is **disabled**, the client-side SDK call `authClient.organization.create()` will be blocked for all users. The SDK also enforces per-user org limits when the toggle is enabled.
 
-### The Drizzle-Kit Trick: Accessing `neon_auth` Tables
+This admin endpoint bypasses **both** restrictions — the toggle and the org limit — by writing directly to the `neon_auth` database tables using Drizzle instead of going through the SDK. This means admins can always provision organizations server-side, regardless of the console settings.
 
-The Neon Auth SDK manages the `neon_auth` schema automatically — you never create those tables yourself. But you **can** get type-safe Drizzle access to them:
-
-**Step 1.** Add `schemaFilter` to `drizzle.config.ts`:
-
-```ts
-export default defineConfig({
-  schema: "./src/db/schema.ts",
-  out: "./drizzle",
-  dialect: "postgresql",
-  schemaFilter: ["public", "neon_auth"],  // <-- the trick
-  dbCredentials: { url: process.env.DATABASE_URL! },
-});
-```
-
-**Step 2.** Pull the schema:
-
-```bash
-npx drizzle-kit pull
-```
-
-This introspects both schemas and generates typed table definitions in `drizzle/schema.ts` — including all `neon_auth` tables (organization, member, invitation, user, session, etc.).
-
-**Step 3.** Copy the tables you need into your app's schema (`src/db/schema.ts`):
-
-```ts
-import { pgSchema, uuid, text, timestamp } from "drizzle-orm/pg-core";
-
-const neonAuth = pgSchema("neon_auth");
-
-export const organizationInNeonAuth = neonAuth.table("organization", {
-  id: uuid().defaultRandom().primaryKey().notNull(),
-  name: text().notNull(),
-  slug: text().notNull(),
-  logo: text(),
-  createdAt: timestamp({ withTimezone: true, mode: "string" }).notNull(),
-  metadata: text(),
-});
-
-export const memberInNeonAuth = neonAuth.table("member", {
-  id: uuid().defaultRandom().primaryKey().notNull(),
-  organizationId: uuid().notNull(),
-  userId: uuid().notNull(),
-  role: text().notNull(),
-  createdAt: timestamp({ withTimezone: true, mode: "string" }).notNull(),
-});
-```
-
-Now you can use `db.insert(organizationInNeonAuth)` with full type safety — no raw SQL.
+This endpoint relies on the Drizzle table definitions from [Section 3: Accessing the `neon_auth` Schema with Drizzle](#3-accessing-the-neon_auth-schema-with-drizzle).
 
 ### The Endpoint: `POST /api/admin/create-org`
 
@@ -641,7 +618,7 @@ Three-step auth check:
 
 ### How It Bypasses the Org Limit
 
-Instead of going through the Neon Auth SDK (which enforces limits), the endpoint **inserts directly into the `neon_auth` schema** using the Drizzle table definitions from the pull:
+Instead of going through the Neon Auth SDK (which enforces limits), the endpoint **inserts directly into the `neon_auth` schema** using the Drizzle table definitions set up in [Section 3](#3-accessing-the-neon_auth-schema-with-drizzle):
 
 ```ts
 import { organizationInNeonAuth, memberInNeonAuth } from "@/db/schema";
@@ -691,4 +668,4 @@ const res = await fetch("/api/admin/create-org", {
 
 ### Key Takeaway
 
-The standard `authClient.organization.create()` is subject to the org limit configured in the Neon console. The admin endpoint bypasses this by writing directly to the `neon_auth` schema using Drizzle. The key enabler is the `schemaFilter: ["public", "neon_auth"]` config + `drizzle-kit pull` combo, which gives you typed access to Neon Auth's internal tables. The admin check uses Neon Auth's own session — `session.user.role` is a global role set in the Neon console, not an org-level role. This means only users explicitly marked as admins in the Neon dashboard can use this endpoint.
+The standard `authClient.organization.create()` is subject to the org limit configured in the Neon console. The admin endpoint bypasses this by writing directly to the `neon_auth` schema using Drizzle (see [Section 3](#3-accessing-the-neon_auth-schema-with-drizzle) for how to set this up). The admin check uses Neon Auth's own session — `session.user.role` is a global role set in the Neon console, not an org-level role. This means only users explicitly marked as admins in the Neon dashboard can use this endpoint.
