@@ -38,6 +38,7 @@ export default function RootLayout({
           authClient={authClient as any}
           redirectTo="/dashboard"
           emailOTP
+          social={{ providers: ["google"] }}
         >
           <header className="flex items-center justify-between border-b px-6 h-14">
             <Link href="/dashboard" className="font-semibold text-lg">
